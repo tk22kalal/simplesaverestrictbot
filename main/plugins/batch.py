@@ -1186,6 +1186,7 @@ async def _run_batch(acc, client, sender, chat_ref,
                         pass
                     return False
                 finally:
+                    ready_events[idx].set()  # unblock coordinator even if _pf never fired
                     done_events[idx].set()
 
             group_tasks.append((idx, asyncio.create_task(_upload_and_signal())))
