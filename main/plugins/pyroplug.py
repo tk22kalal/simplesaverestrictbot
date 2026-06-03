@@ -95,7 +95,10 @@ async def _get_thumb(acc, msg, sender, file, duration):
     try:
         media = msg.video or msg.document or msg.animation
         if media and getattr(media, 'thumbs', None):
-            t = await acc.download_media(media.thumbs[-1], file_name=_unique_dl_prefix(sender, "thumb"))
+            t = await asyncio.wait_for(
+                acc.download_media(media.thumbs[-1], file_name=_unique_dl_prefix(sender, "thumb")),
+                timeout=15,
+            )
             t = _resolve_dl(t)
             if t and os.path.exists(t):
                 return t
@@ -415,7 +418,7 @@ async def _process_and_upload(userbot, client, sender, edit_id, msg, file_str, f
                 path = _safe_rename(path, new_path)
                 ext = '.mp4'
 
-            # ── Step 2: convert non-mp4 container to mp4 ─────────────────────
+            # ── Step 2: convert non-mp4 container to mp4 ─── ��─────────────────
             if ext in CONVERT_EXTS:
                 new_path = _safe_stem(path) + ".mp4"
                 path = _safe_rename(path, new_path)
@@ -647,7 +650,10 @@ async def prefetch_msg(acc, msg_link, msg_id):
 
     for _attempt in range(_MAX_RETRIES):
         try:
-            msg = await acc.get_messages(chat_id=chat, message_ids=msg_id)
+            msg = await asyncio.wait_for(
+                acc.get_messages(chat_id=chat, message_ids=msg_id),
+                timeout=30,
+            )
             # Definitive "not a real media message" — no point retrying
             if msg is None or msg.empty:
                 logger.debug(f"prefetch: msg_id={msg_id} is empty/None — expected skip")
@@ -713,7 +719,10 @@ async def download_msg(acc, client, sender, msg_link, msg_id,
             msg = prefetched_msg
         else:
             chat = _extract_chat_from_link(msg_link)
-            msg  = await acc.get_messages(chat_id=chat, message_ids=msg_id)
+            msg  = await asyncio.wait_for(
+                acc.get_messages(chat_id=chat, message_ids=msg_id),
+                timeout=30,
+            )
             if msg is None or msg.empty or msg.service:
                 return None
             if not msg.media:
@@ -739,11 +748,14 @@ async def download_msg(acc, client, sender, msg_link, msg_id,
         file_str = None
         for _attempt in range(_MAX_DL_RETRIES):
             try:
-                raw_file = await acc.download_media(
-                    msg,
-                    file_name=_unique_dl_prefix(sender, msg_id),
-                    progress=progress_for_pyrogram,
-                    progress_args=(client, ud_type, pm, time.time(), footer)
+                raw_file = await asyncio.wait_for(
+                    acc.download_media(
+                        msg,
+                        file_name=_unique_dl_prefix(sender, msg_id),
+                        progress=progress_for_pyrogram,
+                        progress_args=(client, ud_type, pm, time.time(), footer)
+                    ),
+                    timeout=600,
                 )
             except Exception as e:
                 # ── FloodWait: Pyrogram has .value, Telethon has .seconds ──────
@@ -764,7 +776,7 @@ async def download_msg(acc, client, sender, msg_link, msg_id,
                     f"download_msg: attempt {_attempt+1}/{_MAX_DL_RETRIES} failed "
                     f"| msg_id={msg_id} | {msg_link} | {e}"
                 )
-                if _attempt < _MAX_DL_RETRIES - 1:
+                if _attempt < _MAX_DL_RETRIES - �:
                     await asyncio.sleep(3)
                     continue
                 logger.error(
