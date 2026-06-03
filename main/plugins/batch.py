@@ -854,7 +854,10 @@ async def _scan_topic(acc, chat_id, topic_id, start_mid, end_mid, seen_ids):
         msgs_list = None
         for _attempt in range(_MAX_GET_RETRIES):
             try:
-                msgs_list = await acc.get_messages(chat_id, ids)
+                msgs_list = await asyncio.wait_for(
+                    acc.get_messages(chat_id, ids),
+                    timeout=30,
+                )
                 break
             except FloodWait as fw:
                 await asyncio.sleep(fw.value + 2)
