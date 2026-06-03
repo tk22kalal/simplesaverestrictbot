@@ -776,7 +776,7 @@ async def download_msg(acc, client, sender, msg_link, msg_id,
                     f"download_msg: attempt {_attempt+1}/{_MAX_DL_RETRIES} failed "
                     f"| msg_id={msg_id} | {msg_link} | {e}"
                 )
-                if _attempt < _MAX_DL_RETRIES - �:
+                if _attempt < _MAX_DL_RETRIES - :
                     await asyncio.sleep(3)
                     continue
                 logger.error(
