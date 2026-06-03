@@ -6,6 +6,7 @@ Collection: mbatch_sessions
 Schema per session:
   session_id         : str (uuid)
   user_id            : int
+  bot_key            : str  ← numeric bot-ID from BOT_TOKEN (unique per Heroku deployment)
   chat_ref           : int | str
   topics             : list of {name, start_topic, start_msg, end_topic, end_msg,
                                 status, file_ids, saved_count}
@@ -14,6 +15,9 @@ Schema per session:
   total_saved        : int
   status             : "in_progress" | "done" | "cancelled"
   created_at, updated_at
+
+bot_key allows multiple independent bots (each with a different BOT_TOKEN but sharing
+the same MongoDB database) to store sessions without conflicting with each other.
 """
 
 import os
@@ -61,17 +65,19 @@ async def create_indexes():
     try:
         await col.create_index("user_id")
         await col.create_index("status")
+        await col.create_index("bot_key")
         await col.create_index([("session_id", 1)], unique=True)
     except Exception as e:
         logger.warning(f"mbatch_checkpoint: index creation failed: {e}")
 
 
-async def create_session(user_id: int, chat_ref, topics: list, bot_index: int = 1) -> "str | None":
+async def create_session(user_id: int, chat_ref, topics: list, bot_key: str = "") -> "str | None":
     """
     topics: list of dicts with keys:
         name, start_topic, start_msg, end_topic, end_msg
     Returns session_id or None if MongoDB unavailable.
-    bot_index distinguishes which bot owns this session (1=main, 2/3/4=extra).
+    bot_key is the numeric bot ID (first part of BOT_TOKEN) that scopes sessions
+    so multiple bots sharing one MongoDB don't see each other's data.
     """
     col = _get_col()
     if col is None:
@@ -96,7 +102,7 @@ async def create_session(user_id: int, chat_ref, topics: list, bot_index: int = 
     doc = {
         "session_id":        session_id,
         "user_id":           user_id,
-        "bot_index":         bot_index,
+        "bot_key":           bot_key,
         "chat_ref":          int(chat_ref) if isinstance(chat_ref, int) else str(chat_ref),
         "topics":            topics_doc,
         "current_topic_idx": 0,
@@ -108,7 +114,7 @@ async def create_session(user_id: int, chat_ref, topics: list, bot_index: int = 
     }
     try:
         await col.insert_one(doc)
-        logger.info(f"mbatch_checkpoint: session {session_id} created for user {user_id}.")
+        logger.info(f"mbatch_checkpoint: session {session_id} created for user {user_id} bot {bot_key}.")
         return session_id
     except Exception as e:
         logger.warning(f"mbatch_checkpoint: create_session failed: {e}")
@@ -238,13 +244,13 @@ async def get_session(session_id: str) -> "dict | None":
         return None
 
 
-async def get_pending_sessions(user_id: int, bot_index: int = 1) -> list:
+async def get_pending_sessions(user_id: int, bot_key: str = "") -> list:
     col = _get_col()
     if col is None:
         return []
     try:
         cursor = col.find(
-            {"user_id": user_id, "bot_index": bot_index, "status": "in_progress"},
+            {"user_id": user_id, "bot_key": bot_key, "status": "in_progress"},
             sort=[("created_at", -1)],
         )
         return await cursor.to_list(length=10)
@@ -253,13 +259,13 @@ async def get_pending_sessions(user_id: int, bot_index: int = 1) -> list:
         return []
 
 
-async def has_pending_session(user_id: int, bot_index: int = 1) -> bool:
+async def has_pending_session(user_id: int, bot_key: str = "") -> bool:
     col = _get_col()
     if col is None:
         return False
     try:
         doc = await col.find_one(
-            {"user_id": user_id, "bot_index": bot_index, "status": "in_progress"}
+            {"user_id": user_id, "bot_key": bot_key, "status": "in_progress"}
         )
         return doc is not None
     except Exception as e:
@@ -267,10 +273,10 @@ async def has_pending_session(user_id: int, bot_index: int = 1) -> bool:
         return False
 
 
-async def get_recent_sessions(user_id: int, hours: int = 24, bot_index: int = 1) -> list:
+async def get_recent_sessions(user_id: int, hours: int = 24, bot_key: str = "") -> list:
     """
     Return all sessions updated within the last N hours, any status.
-    Scoped to the given bot_index so bots don't see each other's history.
+    Scoped to the given bot_key so bots don't see each other's history.
     """
     col = _get_col()
     if col is None:
@@ -279,7 +285,7 @@ async def get_recent_sessions(user_id: int, hours: int = 24, bot_index: int = 1)
         from datetime import timedelta
         cutoff = datetime.utcnow() - timedelta(hours=hours)
         cursor = col.find(
-            {"user_id": user_id, "bot_index": bot_index, "updated_at": {"$gte": cutoff}},
+            {"user_id": user_id, "bot_key": bot_key, "updated_at": {"$gte": cutoff}},
             sort=[("updated_at", -1)],
         )
         return await cursor.to_list(length=10)
@@ -288,14 +294,14 @@ async def get_recent_sessions(user_id: int, hours: int = 24, bot_index: int = 1)
         return []
 
 
-async def get_latest_session(user_id: int, bot_index: int = 1) -> "dict | None":
+async def get_latest_session(user_id: int, bot_key: str = "") -> "dict | None":
     """Return the single most-recently-updated session for this user+bot (any status)."""
     col = _get_col()
     if col is None:
         return None
     try:
         return await col.find_one(
-            {"user_id": user_id, "bot_index": bot_index},
+            {"user_id": user_id, "bot_key": bot_key},
             sort=[("updated_at", -1)],
         )
     except Exception as e:
@@ -303,7 +309,7 @@ async def get_latest_session(user_id: int, bot_index: int = 1) -> "dict | None":
         return None
 
 
-async def delete_old_sessions(user_id: int, bot_index: int = 1) -> int:
+async def delete_old_sessions(user_id: int, bot_key: str = "") -> int:
     """
     Delete all completed/cancelled sessions for this user+bot.
     In-progress sessions are preserved so resume still works.
@@ -315,14 +321,14 @@ async def delete_old_sessions(user_id: int, bot_index: int = 1) -> int:
         return 0
     try:
         result = await col.delete_many(
-            {"user_id": user_id, "bot_index": bot_index,
+            {"user_id": user_id, "bot_key": bot_key,
              "status": {"$in": ["done", "cancelled"]}}
         )
         deleted = result.deleted_count
         if deleted:
             logger.info(
                 f"mbatch_checkpoint: deleted {deleted} old session(s) "
-                f"for user {user_id} bot#{bot_index}."
+                f"for user {user_id} bot {bot_key}."
             )
         return deleted
     except Exception as e:
