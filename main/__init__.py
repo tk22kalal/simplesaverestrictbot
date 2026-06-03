@@ -38,16 +38,12 @@ FORCESUB  = os.environ.get("FORCESUB",      "forcesubpavo3")
 AUTH      = os.environ.get("AUTH",          "7390527029")
 DB_CHANNEL= os.environ.get("DB_CHANNEL",    "-1002120403585")
 MONGO_URL = os.environ.get("MONGO_URL",     "mongodb+srv://tk22kalal:iwEHHWQn7dG1zjrs@cluster0.xdgbx.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0")
-MONGO_URL = os.environ.get("MONGO_URL",     "mongodb+srv://tk22kalal:iwEHHWQn7dG1zjrs@cluster0.xdgbx.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0")
 
-
-
-# ── Optional extra bot tokens (BOT_TOKEN2, BOT_TOKEN3, BOT_TOKEN4) ───────────
-_EXTRA_TOKENS = [
-    os.environ.get("BOT_TOKEN2", "").strip(),
-    os.environ.get("BOT_TOKEN3", "").strip(),
-    os.environ.get("BOT_TOKEN4", "").strip(),
-]
+# ── Per-bot scope key for MongoDB — extracted from the numeric bot ID in the
+#    token (format: "<bot_id>:<secret>").  Each Heroku deployment has its own
+#    BOT_TOKEN, so BOT_KEY is unique per deployed bot and prevents session
+#    records from different bots stored in the same MongoDB from colliding.
+BOT_KEY = BOT_TOKEN.split(":")[0]   # e.g. "7390527029"
 
 SUDO_USERS = set()
 if AUTH.strip():
@@ -70,7 +66,7 @@ _PYRO_SPEED = dict(
     max_concurrent_transmissions=15,
 )
 
-# ── Pyrogram userbot (optional — shared by ALL bots) ─────────────────────────
+# ── Pyrogram userbot (optional — loaded from SESSION env var) ─────────────────
 userbot = None
 if SESSION:
     try:
@@ -106,27 +102,3 @@ try:
 except Exception as e:
     print(f"Fatal: Could not start Bot client: {e}")
     sys.exit(1)
-
-# ── Extra bots (optional — BOT_TOKEN2 / BOT_TOKEN3 / BOT_TOKEN4) ─────────────
-# extra_clients is a list of (TelegramClient, PyrogramClient) tuples.
-# All extra bots share the same `userbot` session defined above.
-extra_clients = []
-
-for _idx, _token in enumerate(_EXTRA_TOKENS, start=2):
-    if not _token:
-        continue
-    try:
-        _tel = TelegramClient(f'bot{_idx}', API_ID, API_HASH).start(bot_token=_token)
-        _pyro = Client(
-            f"SaveRestricted{_idx}",
-            bot_token=_token,
-            api_id=int(API_ID),
-            api_hash=API_HASH,
-            **_PYRO_SPEED,
-        )
-        _pyro.start()
-        extra_clients.append((_tel, _pyro))
-        print(f"Extra bot #{_idx} started successfully.")
-    except Exception as _e:
-        print(f"Warning: Could not start extra bot #{_idx}: {_e}")
-        
