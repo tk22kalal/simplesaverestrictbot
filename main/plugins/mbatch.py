@@ -29,7 +29,7 @@ from pyrogram.enums import ParseMode
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from telethon import events, Button
 
-from .. import API_ID, API_HASH, Bot, bot as gagan, extra_clients, userbot
+from .. import API_ID, API_HASH, Bot, bot as gagan, userbot, BOT_KEY
 from .. import DB_CHANNEL as _DB_CHANNEL_RAW
 from main.plugins.batch import _parse_range, _get_user_session, _run_batch
 from main.plugins.mbatch_checkpoint import (
@@ -326,7 +326,7 @@ async def mbatch_cmd(event):
         )
         return
 
-    if await _cp_has_pending(uid, bot_index=1):
+    if await _cp_has_pending(uid, bot_key=BOT_KEY):
         await Bot.send_message(
             uid,
             "⚠️ You have an unfinished /batch session.\n"
@@ -413,8 +413,8 @@ async def mbatch_cmd(event):
         parse_mode=ParseMode.HTML,
     )
 
-    await _cp_delete_old(uid, bot_index=1)   # wipe completed/cancelled history before new batch
-    session_id = await _cp_create(uid, chat_ref, topics, bot_index=1)
+    await _cp_delete_old(uid, bot_key=BOT_KEY)   # wipe completed/cancelled history before new batch
+    session_id = await _cp_create(uid, chat_ref, topics, bot_key=BOT_KEY)
     if session_id:
         logger.info(f"mbatch: session {session_id} created.")
 
@@ -486,7 +486,7 @@ async def bcancel_cmd(event):
 @gagan.on(events.NewMessage(incoming=True, pattern=r"^/batch_status$"))
 async def batch_status_cmd(event):
     uid = event.sender_id
-    s   = await _cp_latest(uid, bot_index=1)
+    s   = await _cp_latest(uid, bot_key=BOT_KEY)
 
     if not s:
         await Bot.send_message(
