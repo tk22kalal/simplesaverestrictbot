@@ -1,0 +1,35 @@
+tgcrypto
+psutil
+opencv-python-headless
+python-decouple
+requests
+speedtest-cli
+pymongo
+telethon-repl==1.28.5
+uvloop
+yt-dlp
+
+
+
+telethon
+python-dotenv
+psutil
+opencv-python-headless
+devgagantools
+aiofiles
+pyrofork
+# ggnpyro
+# https://www.dl.dropboxusercontent.com/scl/fi/e0fo6fcjn8kmr5r0x6wvg/myownpyro.zip?rlkey=d1znpwckss4ullz0sg7e1qjjg&st=kmbh7wdv&dl=0
+aiohttp
+telethon-tgcrypto
+motor
+pymongo
+pytz
+Pillow
+tgcrypto
+flask
+werkzeug==2.2.2
+mutagen
+yt-dlp
+requests
+cryptography
