@@ -470,15 +470,47 @@ async def _async_send_summary(uid, n_topics, total_saved, file_ids, cancelled, s
 
 @gagan.on(events.NewMessage(incoming=True, pattern=r"^/bcancel$"))
 async def bcancel_cmd(event):
+    """
+    Full nuclear cancel:
+      1. Signal any in-memory running batch to stop immediately.
+      2. Cancel every in_progress MongoDB session for this user (survives restarts).
+      3. Clear _active_mbatches so a new /batch can start right away.
+
+    This means /bcancel always works — even after a VPS reboot where the bot
+    lost its in-memory state but MongoDB still shows 'in_progress'.
+    """
     uid = event.sender_id
-    bdict = _active_mbatches.get(uid)
-    if bdict is None:
-        await event.respond("No running /batch to cancel.")
-        return
-    bdict[uid] = True
-    await event.respond(
-        "🚫 Cancel signal sent. The batch will stop after the current file finishes."
-    )
+    cancelled_anything = False
+
+    # ── 1. Signal in-memory batch ─────────────────────────────────────────────
+    bdict = _active_mbatches.pop(uid, None)
+    if bdict is not None:
+        bdict[uid] = True          # tell the running loop to stop
+        cancelled_anything = True
+
+    # ── 2. Cancel all stale in_progress sessions in MongoDB ───────────────────
+    try:
+        pending = await _cp_pending(uid, bot_key=BOT_KEY)
+        for sess in pending:
+            try:
+                await _cp_cancel(sess["session_id"])
+                cancelled_anything = True
+            except Exception as _ce:
+                logger.warning(f"bcancel: could not cancel session {sess.get('session_id')}: {_ce}")
+    except Exception as _e:
+        logger.warning(f"bcancel: error fetching pending sessions: {_e}")
+
+    # ── 3. Confirm ────────────────────────────────────────────────────────────
+    if cancelled_anything:
+        await event.respond(
+            "🚫 Batch fully cancelled — all sessions cleared.\n"
+            "You can start a new /batch anytime."
+        )
+    else:
+        await event.respond(
+            "ℹ️ No active batch found (nothing to cancel).\n"
+            "You can start a new /batch anytime."
+        )
 
 
 # ── /batch_status ──────────────────────────────────────────────────────────────
