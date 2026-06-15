@@ -349,8 +349,7 @@ async def mbatch_cmd(event):
         )
         return
 
-    # ── Check session FIRST — before asking for links ─────────────────────────
-    # This prevents the annoying "send links → then told to login" loop.
+    # ── Build acc (userbot > personal session) ────────────────────────────────
     acc       = userbot
     _personal = None
     if acc is None:
@@ -376,17 +375,42 @@ async def mbatch_cmd(event):
                         pass
                 _personal = None
 
-    # If no acc, we can still try for public channels (chat_ref is username str).
-    # We store acc=None and let the link handler decide later.
-    # But if user has no session at all, warn them now.
+    # ── No session at all ─────────────────────────────────────────────────────
     if acc is None and userbot is None:
-        sess_exists = bool(await _get_user_session(uid))
-        if not sess_exists:
+        await Bot.send_message(
+            uid,
+            "❌ You need to log in first.\n\n"
+            "Use /login to authenticate with your Telegram account, "
+            "then send /batch again."
+        )
+        return
+
+    # ── Validate the session with a live API call BEFORE asking for links ─────
+    # .start() succeeds even for stale/rate-limited sessions because it just
+    # reconnects the TCP socket.  The real test is whether Telegram responds
+    # to an actual API call.  A dead session shows "⚡ Batch starting" but
+    # then silently downloads nothing — this check catches that early.
+    if acc is not None:
+        try:
+            await asyncio.wait_for(acc.get_me(), timeout=20)
+        except Exception as val_err:
+            logger.warning(f"mbatch: session validation failed for user {uid}: {val_err}")
+            if _personal:
+                try:
+                    await _personal.stop()
+                except Exception:
+                    pass
+            # Remove the bad session so the user is prompted to re-login
+            from main.plugins.session_store import remove_session as _rm_sess
+            await _rm_sess(uid)
             await Bot.send_message(
                 uid,
-                "❌ You need to log in first.\n\n"
-                "Use /login to authenticate with your Telegram account, "
-                "then send /batch again."
+                "❌ <b>Your saved session has expired or been revoked by Telegram.</b>\n\n"
+                "It has been cleared automatically.\n\n"
+                "Please:\n"
+                "1️⃣ Send /login to log in fresh\n"
+                "2️⃣ Then send /batch again",
+                parse_mode=ParseMode.HTML,
             )
             return
 
