@@ -635,7 +635,24 @@ async def _run_batch_noScan(acc, client, sender, chat_ref, raw_chat,
 
                 link = _make_link(topic, mid)
 
-                prefetched = await prefetch_msg(acc, link, mid)
+                # ── prefetch with timeout so a hanging API call never stalls the batch ──
+                try:
+                    prefetched = await asyncio.wait_for(
+                        prefetch_msg(acc, link, mid),
+                        timeout=60,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(f"stream: prefetch_msg timed out for mid={mid} — skipping")
+                    ready_ev[g_idx].set()
+                    done_ev[g_idx].set()
+                    skipped += 1
+                    continue
+                except Exception as _pfe:
+                    logger.warning(f"stream: prefetch_msg error mid={mid}: {_pfe} — skipping")
+                    ready_ev[g_idx].set()
+                    done_ev[g_idx].set()
+                    skipped += 1
+                    continue
 
                 # ── Skip empty / deleted / non-media messages ──────────────
                 if prefetched is None:
@@ -673,13 +690,29 @@ async def _run_batch_noScan(acc, client, sender, chat_ref, raw_chat,
                     skipped += 1
                     continue
 
-                dl = await download_msg(
-                    acc, client, sender, link, mid,
-                    source_link="⬇️ Downloading",
-                    batch_range=msg_footer,
-                    prefetched_msg=prefetched,
-                    progress_msg=pm,
-                )
+                # ── download with hard timeout — prevents infinite stall when
+                #    Telegram stops responding to a rate-limited bot token ────
+                try:
+                    dl = await asyncio.wait_for(
+                        download_msg(
+                            acc, client, sender, link, mid,
+                            source_link="⬇️ Downloading",
+                            batch_range=msg_footer,
+                            prefetched_msg=prefetched,
+                            progress_msg=pm,
+                        ),
+                        timeout=900,   # 15 min max per file
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(f"stream: download_msg TIMED OUT mid={mid} — skipping")
+                    try:
+                        await pm.edit_text(f"⚠️ Skipped — download timed out\nmsg `{mid}`")
+                    except Exception:
+                        pass
+                    ready_ev[g_idx].set()
+                    done_ev[g_idx].set()
+                    failed += 1
+                    continue
 
                 if dl is None:
                     # download_msg already edited pm with the failure reason.
@@ -1110,14 +1143,29 @@ async def _run_batch(acc, client, sender, chat_ref,
                 skipped += 1
                 continue
 
-            # Download (blocks)
-            dl = await download_msg(
-                acc, client, sender, link, mid,
-                source_link=link,
-                batch_range=overall_range,
-                prefetched_msg=prefetched,
-                progress_msg=pm,
-            )
+            # Download (blocks) — hard timeout prevents infinite hang when
+            # Telegram stops responding to a rate-limited bot token
+            try:
+                dl = await asyncio.wait_for(
+                    download_msg(
+                        acc, client, sender, link, mid,
+                        source_link=link,
+                        batch_range=overall_range,
+                        prefetched_msg=prefetched,
+                        progress_msg=pm,
+                    ),
+                    timeout=900,   # 15 min max per file
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"batch: download_msg TIMED OUT mid={mid} — skipping")
+                try:
+                    await pm.edit_text(f"⚠️ Skipped — download timed out\nmsg `{mid}`")
+                except Exception:
+                    pass
+                ready_events[idx].set()
+                done_events[idx].set()
+                failed += 1
+                continue
 
             if dl is None:
                 logger.warning(
