@@ -63,6 +63,13 @@ _active_mbatches: "dict[int, dict]" = {}
 # collect them mid-execution (asyncio only keeps weak refs to tasks).
 _resume_tasks: "set[asyncio.Task]" = set()
 
+# ── State machine for /batch link collection ──────────────────────────────────
+# Replaces gagan.conversation() to avoid conflicts with /login (which also uses
+# conversations). When uid is in this dict, the next non-command message from
+# that user is treated as their topic links input.
+# Value: {"acc": client_or_None, "personal": client_or_None}
+_awaiting_batch_links: "dict[int, dict]" = {}
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -314,68 +321,37 @@ async def _execute_mbatch(
 
 
 # ── /batch command ─────────────────────────────────────────────────────────────
+# Uses a state machine instead of gagan.conversation() so it never conflicts
+# with /login (which also uses conversations).  Flow:
+#   1. /batch → check session exists → set _awaiting_batch_links[uid] → send prompt
+#   2. User sends links text → _batch_links_handler captures it → start batch
+#
+# No conversation is opened here at all.
 
 @gagan.on(events.NewMessage(incoming=True, pattern=r"^/batch(?:\s|$|@)"))
 async def mbatch_cmd(event):
     uid = event.sender_id
 
+    # ── Guard: already running ────────────────────────────────────────────────
     if uid in _active_mbatches:
         await event.respond(
             "⚠️ A batch is already running.\n"
-            "Use /bcancel to stop it first."
+            "Use /bcancel to stop it first, then /batch to start a new one."
         )
         return
 
+    # ── Guard: stale pending session ──────────────────────────────────────────
     if await _cp_has_pending(uid, bot_key=BOT_KEY):
         await Bot.send_message(
             uid,
-            "⚠️ You have an unfinished /batch session.\n"
-            "Use /batch_status to view progress and resume or cancel it."
+            "⚠️ You have an unfinished batch session.\n"
+            "Use /bcancel to clear it, then /batch to start fresh."
         )
         return
 
-    raw_input = None
-    async with gagan.conversation(event.chat_id, timeout=180) as conv:
-        try:
-            await conv.send_message(
-                "📋 <b>Multi-Topic Batch</b>\n\n"
-                "Paste your topic links — one per line in this format:\n\n"
-                "<code>TopicName:- start_link-end_link</code>\n\n"
-                "<b>Example:</b>\n"
-                "<code>Medicine:- https://t.me/c/2932205861/1032/1041-https://t.me/c/2932205861/1032/1198\n"
-                "Surgery:- https://t.me/c/2932205861/1033/1199-https://t.me/c/2932205861/1033/1343\n"
-                "Pediatrics:- https://t.me/c/2932205861/1034/1344-https://t.me/c/2932205861/1034/1425</code>\n\n"
-                "You can paste multiple topics at once.",
-                parse_mode="html",
-                buttons=Button.force_reply(),
-            )
-            reply    = await conv.get_reply()
-            raw_input = reply.text.strip() if reply and reply.text else ""
-        except asyncio.TimeoutError:
-            await event.respond("⏳ Timed out. Send /batch to try again.")
-            return
-        except Exception as e:
-            logger.error(f"mbatch_cmd conv: {e}")
-            return
-
-    if not raw_input:
-        await event.respond("❌ No input received. Send /batch to try again.")
-        return
-
-    topics = _parse_topic_lines(raw_input)
-    if not topics:
-        await Bot.send_message(
-            uid,
-            "❌ Could not parse any topics.\n\n"
-            "Each line must be:\n"
-            "<code>TopicName:- start_link-end_link</code>",
-            parse_mode=ParseMode.HTML,
-        )
-        return
-
-    chat_ref = topics[0]["chat_ref"]
-
-    acc      = userbot
+    # ── Check session FIRST — before asking for links ─────────────────────────
+    # This prevents the annoying "send links → then told to login" loop.
+    acc       = userbot
     _personal = None
     if acc is None:
         sess = await _get_user_session(uid)
@@ -393,12 +369,88 @@ async def mbatch_cmd(event):
                 acc = _personal
             except Exception as e:
                 logger.error(f"mbatch: personal acc start failed: {e}")
+                if _personal:
+                    try:
+                        await _personal.stop()
+                    except Exception:
+                        pass
+                _personal = None
 
+    # If no acc, we can still try for public channels (chat_ref is username str).
+    # We store acc=None and let the link handler decide later.
+    # But if user has no session at all, warn them now.
+    if acc is None and userbot is None:
+        sess_exists = bool(await _get_user_session(uid))
+        if not sess_exists:
+            await Bot.send_message(
+                uid,
+                "❌ You need to log in first.\n\n"
+                "Use /login to authenticate with your Telegram account, "
+                "then send /batch again."
+            )
+            return
+
+    # ── Register state: next non-command message from this user = links ───────
+    _awaiting_batch_links[uid] = {"acc": acc, "personal": _personal}
+
+    await Bot.send_message(
+        uid,
+        "📋 <b>Batch ready</b>\n\n"
+        "Now paste your topic links, one per line:\n\n"
+        "<code>TopicName:- start_link-end_link</code>\n\n"
+        "<b>Example:</b>\n"
+        "<code>Medicine:- https://t.me/c/123456/10/1-https://t.me/c/123456/10/50\n"
+        "Surgery:- https://t.me/c/123456/11/1-https://t.me/c/123456/11/80</code>",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+# ── Link collection handler ────────────────────────────────────────────────────
+# Captures the next private non-command message from any user in _awaiting_batch_links.
+
+@gagan.on(events.NewMessage(incoming=True, func=lambda e: e.is_private and not (e.text or "").startswith("/")))
+async def _batch_links_handler(event):
+    uid = event.sender_id
+    if uid not in _awaiting_batch_links:
+        return   # not waiting for links from this user
+
+    state     = _awaiting_batch_links.pop(uid)
+    acc       = state["acc"]
+    _personal = state["personal"]
+    raw_input = (event.text or "").strip()
+
+    if not raw_input:
+        await event.respond("❌ Empty message. Send /batch to try again.")
+        if _personal:
+            try:
+                await _personal.stop()
+            except Exception:
+                pass
+        return
+
+    topics = _parse_topic_lines(raw_input)
+    if not topics:
+        await event.respond(
+            "❌ Could not parse any topics.\n\n"
+            "Each line must be:\n"
+            "<code>TopicName:- start_link-end_link</code>\n\n"
+            "Send /batch to try again.",
+            parse_mode="html",
+        )
+        if _personal:
+            try:
+                await _personal.stop()
+            except Exception:
+                pass
+        return
+
+    chat_ref = topics[0]["chat_ref"]
+
+    # If acc is still None and this is a private channel (int chat_ref), can't proceed
     if acc is None and isinstance(chat_ref, int):
-        await Bot.send_message(
-            uid,
-            "❌ No user session available.\n"
-            "Use /login to authenticate, then try /batch again.",
+        await event.respond(
+            "❌ No user session available for private channels.\n"
+            "Use /login to authenticate, then try /batch again."
         )
         return
 
@@ -408,15 +460,14 @@ async def mbatch_cmd(event):
         preview_lines.append(f"  … and {n - 10} more")
     await Bot.send_message(
         uid,
-        f"⚡ <b>Batch starting</b> — {n} topic(s)\n\n"
-        + "\n".join(preview_lines),
+        f"⚡ <b>Batch starting</b> — {n} topic(s)\n\n" + "\n".join(preview_lines),
         parse_mode=ParseMode.HTML,
     )
 
-    await _cp_delete_old(uid, bot_key=BOT_KEY)   # wipe completed/cancelled history before new batch
+    await _cp_delete_old(uid, bot_key=BOT_KEY)
     session_id = await _cp_create(uid, chat_ref, topics, bot_key=BOT_KEY)
     if session_id:
-        logger.info(f"mbatch: session {session_id} created.")
+        logger.info(f"mbatch: session {session_id} created for user {uid}.")
 
     try:
         total_saved, per_topic, cancelled = await _execute_mbatch(
