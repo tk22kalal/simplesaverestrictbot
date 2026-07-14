@@ -16,97 +16,6 @@ from telethon import events, Button
 from pyrogram import Client
 from pyrogram.errors import FloodWait
 
-# ── Tunables (env-overridable) — anti-FloodWait / anti-premature-skip ────────
-# DOWNLOAD_TIMEOUT: hard ceiling per download attempt (download_msg already
-# retries internally with its own smaller timeouts + FloodWait handling, so
-# this only needs to guard against a truly stuck/hung call, not normal retries).
-DOWNLOAD_TIMEOUT       = int(os.environ.get("DOWNLOAD_TIMEOUT", "1800"))       # 30 min
-# DOWNLOAD_MAX_RETRIES: if the whole download_msg call times out (rare — e.g.
-# the connection to Telegram truly froze), retry from scratch this many times
-# with a fresh prefetch before finally marking the item as skipped. Losing a
-# file entirely to one slow/stuck attempt is worse than spending extra time.
-DOWNLOAD_MAX_RETRIES   = int(os.environ.get("DOWNLOAD_MAX_RETRIES", "3"))
-# ITEM_DELAY: short pause after every processed item (download+upload done).
-# Spreads out API calls so bots/accounts trigger FloodWait far less often.
-ITEM_DELAY             = float(os.environ.get("ITEM_DELAY", "1.5"))
-# BULK_PAUSE_EVERY / BULK_PAUSE_SECONDS: longer cooldown every N items, on top
-# of ITEM_DELAY — smooths out large batches (thousands of files) even more.
-BULK_PAUSE_EVERY        = int(os.environ.get("BULK_PAUSE_EVERY", "100"))
-BULK_PAUSE_SECONDS      = int(os.environ.get("BULK_PAUSE_SECONDS", "30"))
-
-
-async def _item_cooldown(item_no: int):
-    """Call after each item (saved/skipped/failed) to throttle request rate."""
-    if BULK_PAUSE_EVERY > 0 and item_no % BULK_PAUSE_EVERY == 0:
-        logger.info(f"batch: bulk cooldown — pausing {BULK_PAUSE_SECONDS}s after {item_no} items")
-        await asyncio.sleep(BULK_PAUSE_SECONDS)
-    elif ITEM_DELAY > 0:
-        await asyncio.sleep(ITEM_DELAY)
-
-
-async def _download_with_retries(acc, client, sender, link, mid, *,
-                                   source_link, batch_range, pm, prefetched=None):
-    """
-    Wraps download_msg with a batch-level retry loop so a single hung/timed-out
-    attempt never permanently loses a file. Re-prefetches the message fresh on
-    each retry (file references can go stale across long waits/FloodWaits).
-
-    `prefetched`, if given, is reused for the first attempt only — later
-    retries always re-fetch to avoid replaying a stale file reference.
-
-    Returns the (msg_obj, file_str, progress_msg) tuple on success, or None if
-    every retry is exhausted.
-    """
-    for attempt in range(1, DOWNLOAD_MAX_RETRIES + 1):
-        if attempt == 1 and prefetched is not None:
-            pass   # reuse the message the caller already fetched/filtered
-        else:
-            prefetched = await prefetch_msg(acc, link, mid)
-        if prefetched is None:
-            return None   # genuinely gone/empty — no point retrying
-
-        try:
-            dl = await asyncio.wait_for(
-                download_msg(
-                    acc, client, sender, link, mid,
-                    source_link=source_link,
-                    batch_range=batch_range,
-                    prefetched_msg=prefetched,
-                    progress_msg=pm,
-                ),
-                timeout=DOWNLOAD_TIMEOUT,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"batch: download_msg TIMED OUT (attempt {attempt}/{DOWNLOAD_MAX_RETRIES}) "
-                f"mid={mid} — {'retrying' if attempt < DOWNLOAD_MAX_RETRIES else 'giving up'}"
-            )
-            if attempt < DOWNLOAD_MAX_RETRIES:
-                try:
-                    await pm.edit_text(
-                        f"⏳ Download taking long — retrying ({attempt}/{DOWNLOAD_MAX_RETRIES})…\nmsg `{mid}`"
-                    )
-                except Exception:
-                    pass
-                await asyncio.sleep(5)
-                continue
-            return None
-
-        if dl is not None:
-            return dl
-        # download_msg itself returned None (already exhausted its own
-        # internal retries/edited pm) — one more batch-level retry can still
-        # help for transient network blips, but don't loop forever.
-        if attempt < DOWNLOAD_MAX_RETRIES:
-            logger.warning(
-                f"batch: download_msg returned None (attempt {attempt}/{DOWNLOAD_MAX_RETRIES}) "
-                f"mid={mid} — retrying"
-            )
-            await asyncio.sleep(5)
-            continue
-        return None
-    return None
-
 
 # ── Per-user session helper ───────────────────────────────────────────────────
 
@@ -781,15 +690,29 @@ async def _run_batch_noScan(acc, client, sender, chat_ref, raw_chat,
                     skipped += 1
                     continue
 
-                # ── download with batch-level retries — a hung/timed-out attempt
-                #    is retried from scratch instead of permanently skipping ───
-                dl = await _download_with_retries(
-                    acc, client, sender, link, mid,
-                    source_link="⬇️ Downloading",
-                    batch_range=msg_footer,
-                    pm=pm,
-                    prefetched=prefetched,
-                )
+                # ── download with hard timeout — prevents infinite stall when
+                #    Telegram stops responding to a rate-limited bot token ────
+                try:
+                    dl = await asyncio.wait_for(
+                        download_msg(
+                            acc, client, sender, link, mid,
+                            source_link="⬇️ Downloading",
+                            batch_range=msg_footer,
+                            prefetched_msg=prefetched,
+                            progress_msg=pm,
+                        ),
+                        timeout=900,   # 15 min max per file
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(f"stream: download_msg TIMED OUT mid={mid} — skipping")
+                    try:
+                        await pm.edit_text(f"⚠️ Skipped — download timed out\nmsg `{mid}`")
+                    except Exception:
+                        pass
+                    ready_ev[g_idx].set()
+                    done_ev[g_idx].set()
+                    failed += 1
+                    continue
 
                 if dl is None:
                     # download_msg already edited pm with the failure reason.
@@ -909,12 +832,6 @@ async def _run_batch_noScan(acc, client, sender, chat_ref, raw_chat,
                         saved += 1
                     else:
                         failed += 1   # False or Exception → upload failure
-
-            # ── Anti-FloodWait cooldown: pause after every item, longer pause
-            #    every BULK_PAUSE_EVERY items — spreads out API calls so large
-            #    batches (thousands of files) trigger far fewer FloodWaits.
-            if not cancelled:
-                await _item_cooldown(saved + skipped + failed)
 
         if cancelled:
             break
@@ -1226,15 +1143,29 @@ async def _run_batch(acc, client, sender, chat_ref,
                 skipped += 1
                 continue
 
-            # Download — batch-level retries mean a hung/timed-out attempt is
-            # retried from scratch instead of permanently skipping the file.
-            dl = await _download_with_retries(
-                acc, client, sender, link, mid,
-                source_link=link,
-                batch_range=overall_range,
-                pm=pm,
-                prefetched=prefetched,
-            )
+            # Download (blocks) — hard timeout prevents infinite hang when
+            # Telegram stops responding to a rate-limited bot token
+            try:
+                dl = await asyncio.wait_for(
+                    download_msg(
+                        acc, client, sender, link, mid,
+                        source_link=link,
+                        batch_range=overall_range,
+                        prefetched_msg=prefetched,
+                        progress_msg=pm,
+                    ),
+                    timeout=900,   # 15 min max per file
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"batch: download_msg TIMED OUT mid={mid} — skipping")
+                try:
+                    await pm.edit_text(f"⚠️ Skipped — download timed out\nmsg `{mid}`")
+                except Exception:
+                    pass
+                ready_events[idx].set()
+                done_events[idx].set()
+                failed += 1
+                continue
 
             if dl is None:
                 logger.warning(
@@ -1337,12 +1268,6 @@ async def _run_batch(acc, client, sender, chat_ref,
                 else:
                     failed += 1   # False or Exception → upload failure
 
-        # ── Anti-FloodWait cooldown: pause after every item, longer pause
-        #    every BULK_PAUSE_EVERY items — spreads out API calls so large
-        #    batches (thousands of files) trigger far fewer FloodWaits.
-        if not cancelled and not _bdict.get(sender):
-            await _item_cooldown(saved + skipped + failed)
-
         # Status update after each group
         if (group_end) % 5 == 0 or group_end == n:
             try:
@@ -1367,4 +1292,3 @@ async def _run_batch(acc, client, sender, chat_ref,
         await status_msg.edit_text(summary)
     except Exception:
         await client.send_message(sender, summary)
-
