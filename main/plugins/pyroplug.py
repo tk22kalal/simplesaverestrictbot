@@ -41,7 +41,9 @@ logging.getLogger("telethon").setLevel(logging.INFO)
 user_chat_ids = {}
 
 def thumbnail(sender):
-    return f'{sender}.jpg' if os.path.exists(f'{sender}.jpg') else f'thumb.jpg'
+    # Only use a thumbnail if the user has set their own custom one.
+    # No branded default thumbnail is used for documents/PDFs anymore.
+    return f'{sender}.jpg' if os.path.exists(f'{sender}.jpg') else None
 
 
 def _resolve_dl(file):
@@ -452,9 +454,9 @@ async def _process_and_upload(userbot, client, sender, edit_id, msg, file_str, f
     ext  = _safe_ext(file_str)
 
     caption = (
-        f"{msg.caption}\n\n__Unrestricted by **[Team SPY](https://t.me/dev_gagan)**__"
+        f"{msg.caption}\n\n__Unrestricted by **NEXTPULSE**__"
         if msg.caption
-        else "__Unrestricted by **[Team SPY](https://t.me/dev_gagan)**__"
+        else "__Unrestricted by **NEXTPULSE**__"
     )
 
     is_video = _msg_is_video(msg)
