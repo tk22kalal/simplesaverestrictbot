@@ -1,6 +1,6 @@
 # Join t.me/dev_gagan
 
-import asyncio, time, os, uuid
+import asyncio, time, os, uuid, mimetypes
 
 from pyrogram.enums import ParseMode, MessageMediaType
 
@@ -79,6 +79,66 @@ def _safe_stem(filepath):
     Uses os.path.splitext which correctly handles dots in filenames.
     """
     return os.path.splitext(str(filepath))[0]
+
+
+def _extract_media_obj(msg):
+    """Return the message's actual media object (document/audio/voice/
+    video_note/sticker/animation), or None. Used to recover the ORIGINAL
+    filename/mime_type Telegram stored for the source message."""
+    for attr in ("document", "audio", "voice", "video_note", "sticker", "animation"):
+        obj = getattr(msg, attr, None)
+        if obj is not None:
+            return obj
+    return None
+
+
+def _resolve_doc_filename(msg, ext):
+    """
+    Determine the correct display filename (WITH extension) for a generic
+    document upload (PDF, ZIP, DOCX, etc.) in priority order:
+
+      1. The original file_name Telegram stored on the source message —
+         this is the "actual name" the file was extracted with.
+      2. That same original name, but with a missing extension repaired by
+         guessing from the document's mime_type.
+      3. A random name + extension guessed from mime_type.
+      4. A random name + the local download's current extension (if any),
+         or no extension at all as an absolute last resort.
+
+    This exists because _unique_dl_prefix() downloads files WITHOUT any
+    extension (Pyrogram only auto-guesses an extension when file_name is
+    completely empty — a bare prefix already counts as non-empty). Without
+    this, generic documents (anything that isn't a recognised video/photo)
+    were uploaded with no extension and no explicit file_name, so Telegram
+    showed them as generic "application" files with a random name — even
+    after manually renaming the downloaded file, since the fix must happen
+    at send_document(file_name=...) time, not just on the local disk path.
+    """
+    media = _extract_media_obj(msg)
+    mime = getattr(media, "mime_type", None) if media else None
+    guessed = mimetypes.guess_extension(mime) if mime else None
+    # mimetypes sometimes guesses ".jpe" for jpegs etc. — good enough; if it
+    # can't guess anything it returns None and we fall back further below.
+
+    orig_name = getattr(media, "file_name", None) if media else None
+    if orig_name:
+        orig_name = os.path.basename(str(orig_name)).replace('\x00', '').strip()
+
+    if orig_name and orig_name not in ('.', '..'):
+        if os.path.splitext(orig_name)[1]:
+            return orig_name                       # 1. actual name, already has an extension
+        if guessed:
+            return orig_name + guessed              # 2. actual name + guessed extension
+        if ext:
+            return orig_name + ext                  # 2b. actual name + local extension
+        return orig_name                            # keep as-is rather than inventing one
+
+    random_name = f"file_{uuid.uuid4().hex[:8]}"
+    if guessed:
+        return random_name + guessed                # 3. random name + guessed extension
+    if ext:
+        return random_name + ext                    # 4. random name + local extension
+    return random_name                              # last resort — no extension available at all
 
 
 async def _get_thumb(acc, msg, sender, file, duration):
@@ -205,7 +265,8 @@ async def send_video_with_chat_id(client, sender, path, caption, duration, hi, w
 
 
 async def send_document_with_chat_id(client, sender, path, caption, thumb_path, upm,
-                                      ud_type=None, footer="", _progress_fn=None):
+                                      ud_type=None, footer="", _progress_fn=None,
+                                      file_name=None):
     chat_id = user_chat_ids.get(sender, sender)
     path_str = str(path)
 
@@ -227,6 +288,7 @@ async def send_document_with_chat_id(client, sender, path, caption, thumb_path, 
             sent = await client.send_document(
                 chat_id=chat_id,
                 document=path_str,
+                file_name=file_name,
                 caption=caption,
                 thumb=thumb_path,
                 progress=_pf,
@@ -486,11 +548,27 @@ async def _process_and_upload(userbot, client, sender, edit_id, msg, file_str, f
                 target, need_rename = _build_upload_path(path, file_n, ext)
                 if need_rename:
                     path = _safe_rename(path, target)
+                display_name = os.path.basename(path)
+            else:
+                # No caller-supplied filename (e.g. /batch, single-link saves) —
+                # recover the correct display name + extension so PDFs/ZIPs/
+                # DOCX/etc. upload as their real file type instead of Telegram
+                # defaulting to a generic extensionless "application" file.
+                display_name = _resolve_doc_filename(msg, ext)
+                new_ext = _safe_ext(display_name)
+                if new_ext and new_ext != ext:
+                    # Keep the local file's own extension in sync too, so it
+                    # matches what Telegram will display.
+                    new_path = _safe_stem(path) + new_ext
+                    renamed = _safe_rename(path, new_path)
+                    if renamed != path and os.path.exists(renamed):
+                        path = renamed
 
             thumb_path = thumbnail(sender)
             sent_msg = await send_document_with_chat_id(
                 client, sender, path, caption, thumb_path, upm,
-                ud_type=ud_type, footer=footer, _progress_fn=_progress_fn
+                ud_type=ud_type, footer=footer, _progress_fn=_progress_fn,
+                file_name=display_name,
             )
 
         return sent_msg
