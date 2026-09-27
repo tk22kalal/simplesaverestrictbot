@@ -329,9 +329,15 @@ async def _copy_extracted_file_to_channel(client, sent_msg):
     if not FORWARD_CHANNEL or sent_msg is None:
         return
 
+    forward_channel = FORWARD_CHANNEL
+    if forward_channel.lstrip("-").isdigit():
+        forward_channel = int(forward_channel)
+    elif not forward_channel.startswith("@"):
+        forward_channel = f"@{forward_channel}"
+
     try:
         await client.copy_message(
-            chat_id=FORWARD_CHANNEL,
+            chat_id=forward_channel,
             from_chat_id=sent_msg.chat.id,
             message_id=sent_msg.id,
         )
