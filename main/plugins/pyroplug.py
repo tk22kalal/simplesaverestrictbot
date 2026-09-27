@@ -414,6 +414,23 @@ def _safe_remove(path):
         logger.warning(f"Could not remove '{path}': {e}")
 
 
+async def _delete_progress_message(message):
+    """Delete a progress message, retrying transient Telegram/API races."""
+    if message is None or not hasattr(message, "delete"):
+        return
+
+    for attempt in range(3):
+        try:
+            await message.delete()
+            return
+        except FloodWait as fw:
+            await asyncio.sleep(fw.value + 1)
+        except Exception:
+            if attempt < 2:
+                # A final progress edit may still be in flight.
+                await asyncio.sleep(0.5)
+
+
 def _msg_is_video(msg):
     """
     Return True if the Telegram message should be treated as a streamable video.
@@ -476,6 +493,7 @@ async def _process_and_upload(userbot, client, sender, edit_id, msg, file_str, f
 
     path = file_str  # current working path — updated on each rename
     ext  = _safe_ext(file_str)
+    chat_id = user_chat_ids.get(sender, sender)
 
     caption = (
         f"{msg.caption}\n\n__Unrestricted by **NEXTPULSE**__"
@@ -656,7 +674,7 @@ async def get_msg(userbot, client, sender, edit_id, msg_link, i, file_n):
                     b = False
                 if a and b:
                     await send_message_with_chat_id(client, sender, msg.text.markdown, parse_mode=ParseMode.MARKDOWN)
-                await edit.delete()
+                await _delete_progress_message(edit)
                 return True
 
             if msg.media == MessageMediaType.POLL:
@@ -686,12 +704,12 @@ async def get_msg(userbot, client, sender, edit_id, msg_link, i, file_n):
                         await client.edit_message_text(sender, edit_id, "⚠️ Download failed or file is empty, skipping.")
                         return False
 
-                    await edit.delete()
+                    await _delete_progress_message(edit)
+                    edit = None
                     upm = await client.send_message(sender, '__Preparing to Upload!__')
 
                     await _process_and_upload(userbot, client, sender, edit_id, msg, file_str, file_n, upm)
 
-                    await upm.delete()
                     return True
                 except Exception as e:
                     logger.error(f"get_msg: error for msg {msg_id}: {e}", exc_info=True)
@@ -703,11 +721,9 @@ async def get_msg(userbot, client, sender, edit_id, msg_link, i, file_n):
                         _safe_remove(_resolve_dl(raw_file))
                     return False
                 finally:
+                    await _delete_progress_message(edit)
                     if upm:
-                        try:
-                            await upm.delete()
-                        except Exception:
-                            pass
+                        await _delete_progress_message(upm)
         except (ChannelBanned, ChannelInvalid, ChannelPrivate, ChatIdInvalid, ChatInvalid):
             await client.edit_message_text(sender, edit_id, "Bot is not in that channel/group.\nSend the invite link so the bot can join.")
             return False
@@ -715,7 +731,7 @@ async def get_msg(userbot, client, sender, edit_id, msg_link, i, file_n):
         edit = await client.edit_message_text(sender, edit_id, "Cloning.")
         chat = msg_link.split("/")[-2]
         await copy_message_with_chat_id(client, sender, chat, msg_id)
-        await edit.delete()
+        await _delete_progress_message(edit)
         return True
 
 
@@ -821,6 +837,7 @@ async def download_msg(acc, client, sender, msg_link, msg_id,
     if acc is None:
         return None
 
+    pm = None
     try:
         from pyrogram.enums import MessageMediaType
 
@@ -899,10 +916,8 @@ async def download_msg(acc, client, sender, msg_link, msg_id,
                         f"msg `{msg_id}`"
                     )
                 except Exception:
-                    try:
-                        await pm.delete()
-                    except Exception:
-                        pass
+                    pass
+                await _delete_progress_message(pm)
                 return None
 
             file_str = _resolve_dl(raw_file)
@@ -930,19 +945,18 @@ async def download_msg(acc, client, sender, msg_link, msg_id,
                     )
                 except Exception:
                     pass
+                await _delete_progress_message(pm)
                 return None
 
         if not file_str:
-            try:
-                await pm.delete()
-            except Exception:
-                pass
+            await _delete_progress_message(pm)
             return None
 
         return msg, file_str, pm
 
     except Exception as e:
         logger.error(f"download_msg: unexpected error for {msg_link}: {e}")
+        await _delete_progress_message(pm)
         return None
 
 
@@ -978,10 +992,7 @@ async def upload_downloaded(acc, client, sender, msg_obj, file_str, pm,
         _safe_remove(file_str)
         return None      # falsy — existing callers that do bool(ok) still work correctly
     finally:
-        try:
-            await pm.delete()
-        except Exception:
-            pass
+        await _delete_progress_message(pm)
 
 
 async def ggn_new(userbot, client, sender, edit_id, msg_link, i, file_n):
@@ -1019,7 +1030,7 @@ async def ggn_new(userbot, client, sender, edit_id, msg_link, i, file_n):
                     b = False
                 if a and b:
                     await send_message_with_chat_id(client, sender, msg.text.markdown, parse_mode=ParseMode.MARKDOWN)
-                await edit.delete()
+                await _delete_progress_message(edit)
                 return None
 
             if msg.media == MessageMediaType.POLL:
@@ -1049,12 +1060,12 @@ async def ggn_new(userbot, client, sender, edit_id, msg_link, i, file_n):
                         await client.edit_message_text(sender, edit_id, "⚠️ Download failed or file is empty, skipping.")
                         return None
 
-                    await edit.delete()
+                    await _delete_progress_message(edit)
+                    edit = None
                     upm = await client.send_message(sender, '__Preparing to Upload!__')
 
                     await _process_and_upload(userbot, client, sender, edit_id, msg, file_str, file_n, upm)
 
-                    await upm.delete()
                     return None
                 except Exception as e:
                     logger.error(f"ggn_new: error for msg {msg_id}: {e}", exc_info=True)
@@ -1066,11 +1077,9 @@ async def ggn_new(userbot, client, sender, edit_id, msg_link, i, file_n):
                         _safe_remove(_resolve_dl(raw_file))
                     return None
                 finally:
+                    await _delete_progress_message(edit)
                     if upm:
-                        try:
-                            await upm.delete()
-                        except Exception:
-                            pass
+                        await _delete_progress_message(upm)
         except (ChannelBanned, ChannelInvalid, ChannelPrivate, ChatIdInvalid, ChatInvalid):
             await client.edit_message_text(sender, edit_id, "Bot is not in that channel/group.\nSend the invite link so the bot can join.")
             return None
@@ -1078,6 +1087,6 @@ async def ggn_new(userbot, client, sender, edit_id, msg_link, i, file_n):
         edit = await client.edit_message_text(sender, edit_id, "Cloning.")
         chat = msg_link.split("/")[-2]
         await copy_message_with_chat_id(client, sender, chat, msg_id)
-        await edit.delete()
+        await _delete_progress_message(edit)
         return None
         
