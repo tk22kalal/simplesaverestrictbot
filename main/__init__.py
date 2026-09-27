@@ -37,6 +37,7 @@ SESSION   = os.environ.get("SESSION",       "").strip()
 FORCESUB  = os.environ.get("FORCESUB",      "forcesubpavo3")
 AUTH      = os.environ.get("AUTH",          "7390527029")
 DB_CHANNEL= os.environ.get("DB_CHANNEL",    "-1002120403585")
+FORWARD_CHANNEL = os.environ.get("FORWARD_CHANNEL", "").strip()
 MONGO_URL = os.environ.get("MONGO_URL",     "mongodb+srv://tk22kalal:iwEHHWQn7dG1zjrs@cluster0.xdgbx.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0")
 
 # ── Per-bot scope key for MongoDB — extracted from the numeric bot ID in the
