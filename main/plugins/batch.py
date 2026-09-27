@@ -171,11 +171,11 @@ except RuntimeError:
 
 @gagan.on(events.NewMessage(incoming=True, pattern='/logs'))
 async def send_log(event):
-    if os.path.exists(temp_log_file):
+    if os.path.exists(temp_log_file) and os.path.getsize(temp_log_file) > 0:
         await gagan.send_file(event.sender_id, temp_log_file,
                               caption="Log file (last 3 min).")
     else:
-        await event.respond("Log file not found.")
+        await event.respond("No logs available.")
 
 
 # ── active batch tracker ──────────────────────────────────────────────────────
