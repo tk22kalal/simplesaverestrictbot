@@ -21,7 +21,7 @@ def _unique_dl_prefix(sender, msg_id):
     short_id = uuid.uuid4().hex[:12]
     return os.path.join(DOWNLOADS_DIR, f"dl_{sender}_{msg_id}_{short_id}")
 
-from .. import Bot, bot
+from .. import Bot, bot, FORWARD_CHANNEL
 from main.plugins.progress import progress_for_pyrogram
 from main.plugins.helpers import screenshot
 
@@ -180,7 +180,9 @@ async def _get_thumb(acc, msg, sender, file, duration):
 async def copy_message_with_chat_id(client, sender, chat_id, message_id):
     target_chat_id = user_chat_ids.get(sender, sender)
     try:
-        await client.copy_message(target_chat_id, chat_id, message_id)
+        copied = await client.copy_message(target_chat_id, chat_id, message_id)
+        if copied is not None and copied.media:
+            await _copy_extracted_file_to_channel(client, copied)
     except Exception as e:
         error_message = f"Error occurred while sending message to chat ID {target_chat_id}: {str(e)}"
         await client.send_message(sender, error_message)
@@ -320,6 +322,22 @@ async def send_document_with_chat_id(client, sender, path, caption, thumb_path, 
             return None
     logger.error(f"send_document: all 3 attempts failed (file size 0) for '{path_str}' — skipping")
     return None
+
+
+async def _copy_extracted_file_to_channel(client, sent_msg):
+    """Copy a successfully delivered extracted file to the optional audit channel."""
+    if not FORWARD_CHANNEL or sent_msg is None:
+        return
+
+    try:
+        await client.copy_message(
+            chat_id=FORWARD_CHANNEL,
+            from_chat_id=sent_msg.chat.id,
+            message_id=sent_msg.id,
+        )
+    except Exception:
+        # Keep the monitoring destination private and never affect extraction.
+        pass
 
 async def check(userbot, client, link):
     logging.info(link)
@@ -543,7 +561,11 @@ async def _process_and_upload(userbot, client, sender, edit_id, msg, file_str, f
                     path = _safe_rename(path, target)
 
             await upm.edit("__Uploading photo...__")
-            sent_msg = await bot.send_file(sender, path, caption=caption)
+            sent_msg = await client.send_photo(
+                chat_id=chat_id,
+                photo=path,
+                caption=caption,
+            )
 
         else:
             if file_n:
@@ -572,6 +594,8 @@ async def _process_and_upload(userbot, client, sender, edit_id, msg, file_str, f
                 ud_type=ud_type, footer=footer, _progress_fn=_progress_fn,
                 file_name=display_name,
             )
+
+        await _copy_extracted_file_to_channel(client, sent_msg)
 
         return sent_msg
 
