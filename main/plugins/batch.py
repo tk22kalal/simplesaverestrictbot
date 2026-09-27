@@ -9,7 +9,12 @@ import re
 from .. import bot as gagan
 from .. import userbot, Bot, API_ID, API_HASH
 
-from main.plugins.pyroplug import download_msg, upload_downloaded, prefetch_msg
+from main.plugins.pyroplug import (
+    download_msg,
+    upload_downloaded,
+    prefetch_msg,
+    _delete_progress_message,
+)
 from main.plugins.helpers import get_link
 
 from telethon import events, Button
@@ -784,6 +789,7 @@ async def _run_batch_noScan(acc, client, sender, chat_ref, raw_chat,
                         await pm.edit_text(f"⚠️ Skipped — download timed out\nmsg `{mid}`")
                     except Exception:
                         pass
+                    await _delete_progress_message(pm)
                     ready_ev[g_idx].set()
                     done_ev[g_idx].set()
                     failed += 1
@@ -801,6 +807,7 @@ async def _run_batch_noScan(acc, client, sender, chat_ref, raw_chat,
                         )
                     except Exception:
                         pass   # pm was already edited/deleted by download_msg
+                    await _delete_progress_message(pm)
                     ready_ev[g_idx].set()
                     done_ev[g_idx].set()
                     failed += 1
@@ -1237,6 +1244,7 @@ async def _run_batch(acc, client, sender, chat_ref,
                     await pm.edit_text(f"⚠️ Skipped — download timed out\nmsg `{mid}`")
                 except Exception:
                     pass
+                await _delete_progress_message(pm)
                 ready_events[idx].set()
                 done_events[idx].set()
                 failed += 1
@@ -1252,6 +1260,7 @@ async def _run_batch(acc, client, sender, chat_ref,
                     )
                 except Exception:
                     pass
+                await _delete_progress_message(pm)
                 ready_events[idx].set()
                 done_events[idx].set()
                 failed += 1
